@@ -1,39 +1,33 @@
-from datasets import load_dataset
-from torchvision.transforms import Compose, ToTensor, Lambda, ToPILImage, CenterCrop, Resize
- 
-# load dataset from the hub
-dataset = load_dataset("fashion_mnist")
-image_size = 28
-channels = 1
-batch_size = 128
- 
- 
-from torchvision import transforms
-from torch.utils.data import DataLoader
- 
-transform = Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Lambda(lambda t: (t * 2) - 1)
-])
- 
-def transforms(examples):
-   examples["pixel_values"] = [transform(image.convert("L")) for image in examples["image"]]
-   del examples["image"]
- 
-   return examples
- 
-transformed_dataset = dataset.with_transform(transforms).remove_columns("label")
-dataloader = DataLoader(transformed_dataset["train"], batch_size=batch_size, shuffle=True)
-batch = next(iter(dataloader))
-print(batch.keys())    # dict_keys(['pixel_values'])
-
-from torch.optim import Adam
-import torch
 from model import Unet
- 
-from diffusion import DiffusionModel
-diff = DiffusionModel()
+import torch
+import torch.nn.functional as F
+from datagenerator import create_dataset
+model = Unet(
+            dim=256,
+            channels=3,
+            with_pose_emb=True
+        )
+train_loader,val_loader = create_dataset()
 
-diff.train(dataloader)
-    
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+def train(model,train_loader,val_loader,optimizer,epochs=10):
+   device = "cuda" if torch.cuda.is_available() else "cpu"
+   for epoch in range(epochs):
+      for step, batch in enumerate(train_loader):
+         optimizer.zero_grad()
+        
+         batch_size = batch["image_ori"].shape[0]
+         batch = batch.to(device)
+
+         predict = model(batch['image_ori'],p = batch['keys_trans']-batch['keys_ori'])
+         loss = F.smooth_l1_loss(predict, batch['image_trans'])
+            
+         if step % 100 == 0:
+            print("Loss:", loss.item())
+            
+            loss.backward()
+            optimizer.step()
+
+   return model
+
+model = train(model,train_loader,val_loader,optimizer,epochs=10)

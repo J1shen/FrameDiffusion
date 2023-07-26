@@ -47,6 +47,24 @@ class SinusoidalPositionEmbeddings(nn.Module):
         embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
         return embeddings
     
+# Figure Pose embeddings
+class PoseEmbeddings(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        self.fc1 = nn.Linear(32, 64)
+        self.fc2 = nn.Linear(64, 64)
+        self.relu = nn.ReLU(inplace=True)
+        self.embedding = nn.Linear(64, dim)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        x = self.relu(x)
+        x = self.embedding(x)
+        return x
+    
 class Block(nn.Module):
     def __init__(self, dim, dim_out, groups = 8):
         super().__init__()
@@ -68,19 +86,25 @@ class Block(nn.Module):
 class ResnetBlock(nn.Module):
     """Deep Residual Learning for Image Recognition"""
     
-    def __init__(self, dim, dim_out, *, time_emb_dim=None, groups=8):
+    def __init__(self, dim, dim_out, *, time_emb_dim=None, pose_emb_dim=None, groups=8):
         super().__init__()
         self.mlp = (
             nn.Sequential(nn.SiLU(), nn.Linear(time_emb_dim, dim_out))
             if exists(time_emb_dim)
             else None
         )
- 
+
+        self.pose = (
+            nn.Sequential(nn.SiLU(), nn.Linear(pose_emb_dim, dim_out))
+            if exists(pose_emb_dim)
+            else None
+        )
+
         self.block1 = Block(dim, dim_out, groups=groups)
         self.block2 = Block(dim_out, dim_out, groups=groups)
         self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
  
-    def forward(self, x, time_emb=None):
+    def forward(self, x, time_emb=None, pose_emb=None):
         h = self.block1(x)
  
         if exists(self.mlp) and exists(time_emb):
@@ -88,12 +112,17 @@ class ResnetBlock(nn.Module):
             h = rearrange(time_emb, "b c -> b c 1 1") + h
  
         h = self.block2(h)
+
+        if exists(self.pose) and exists(pose_emb):
+            pose_emb = self.mlp(pose_emb)
+            h = rearrange(pose_emb, "b c -> b c 1 1") + h
+
         return h + self.res_conv(x)
     
 class ConvNextBlock(nn.Module):
     """A ConvNet for the 2020s"""
  
-    def __init__(self, dim, dim_out, *, time_emb_dim=None, mult=2, norm=True):
+    def __init__(self, dim, dim_out, *, time_emb_dim=None, pose_emb_dim=None, mult=2, norm=True):
         super().__init__()
         self.mlp = (
             nn.Sequential(nn.GELU(), nn.Linear(time_emb_dim, dim))
@@ -193,7 +222,8 @@ class Unet(nn.Module):
         out_dim=None,
         dim_mults=(1, 2, 4, 8),
         channels=3,
-        with_time_emb=True,
+        with_time_emb=False,
+        with_pose_emb=False,
         resnet_block_groups=8,
         use_convnext=True,
         convnext_mult=2,
@@ -226,6 +256,14 @@ class Unet(nn.Module):
         else:
             time_dim = None
             self.time_mlp = None
+
+        # pose embeddings
+        if with_pose_emb:
+            pos_dim = dim * 2
+            self.posenet = PoseEmbeddings(dim)
+        else:
+            pos_dim = None
+            self.posenet = None
  
         # layers
         self.downs = nn.ModuleList([])
@@ -238,8 +276,8 @@ class Unet(nn.Module):
             self.downs.append(
                 nn.ModuleList(
                     [
-                        block_klass(dim_in, dim_out, time_emb_dim=time_dim),
-                        block_klass(dim_out, dim_out, time_emb_dim=time_dim),
+                        block_klass(dim_in, dim_out, time_emb_dim=time_dim,pose_emb_dim=pos_dim),
+                        block_klass(dim_out, dim_out, time_emb_dim=time_dim,pose_emb_dim=pos_dim),
                         Residual(PreNorm(dim_out, LinearAttention(dim_out))),
                         Downsample(dim_out) if not is_last else nn.Identity(),
                     ]
@@ -257,8 +295,8 @@ class Unet(nn.Module):
             self.ups.append(
                 nn.ModuleList(
                     [
-                        block_klass(dim_out * 2, dim_in, time_emb_dim=time_dim),
-                        block_klass(dim_in, dim_in, time_emb_dim=time_dim),
+                        block_klass(dim_out * 2, dim_in, time_emb_dim=time_dim,pose_emb_dim=pos_dim),
+                        block_klass(dim_in, dim_in, time_emb_dim=time_dim,pose_emb_dim=pos_dim),
                         Residual(PreNorm(dim_in, LinearAttention(dim_in))),
                         Upsample(dim_in) if not is_last else nn.Identity(),
                     ]
@@ -270,29 +308,32 @@ class Unet(nn.Module):
             block_klass(dim, dim), nn.Conv2d(dim, out_dim, 1)
         )
  
-    def forward(self, x, time):
+    def forward(self, x, time, pose=None):
         x = self.init_conv(x)
         t = self.time_mlp(time) if exists(self.time_mlp) else None
+
+        p= self.posenet(pose) if exists(self.posenet) else None
+
         h = []
  
         # downsample
         for block1, block2, attn, downsample in self.downs:
-            x = block1(x, t)
-            x = block2(x, t)
+            x = block1(x, t, p)
+            x = block2(x, t, p)
             x = attn(x)
             h.append(x)
             x = downsample(x)
  
         # bottleneck
-        x = self.mid_block1(x, t)
+        x = self.mid_block1(x, t, p)
         #x = self.mid_attn(x)
-        x = self.mid_block2(x, t)
+        x = self.mid_block2(x, t, p)
  
         # upsample
         for block1, block2, attn, upsample in self.ups:
             x = torch.cat((x, h.pop()), dim=1)
-            x = block1(x, t)
-            x = block2(x, t)
+            x = block1(x, t, p)
+            x = block2(x, t, p)
             x = attn(x)
             x = upsample(x)
  

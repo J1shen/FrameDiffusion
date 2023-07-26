@@ -29,6 +29,11 @@ class DiffusionModel():
         self.posterior_variance = self.betas * (1. - self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
 
         #training
+        self.model = Unet(
+            dim=256,
+            channels=3,
+            #dim_mults=(1, 2, 4,)
+        )
 
     def extract(self,a, t, x_shape):
         batch_size = t.shape[0]
@@ -56,14 +61,17 @@ class DiffusionModel():
         noisy_image = vec2img(x_noisy)
         return noisy_image
     
-    def p_losses(self,denoise_model, x_start, t, noise=None, loss_type="l1"):
+    def p_losses(self,denoise_model, x, t, noise=None, loss_type="l1"):
+        
+        img = x['image_ori']
+        p = x['keys_trans'] - x['keys_ori']
         # 先采样噪声
         if noise is None:
-            noise = torch.randn_like(x_start)
+            noise = torch.randn_like(img)
         
         # 用采样得到的噪声去加噪图片
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        predicted_noise = denoise_model(x_noisy, t)
+        x_noisy = self.q_sample(x_start=img, t=t, noise=noise)
+        predicted_noise = denoise_model(x_noisy, t, p)
         
         # 根据加噪了的图片去预测采样的噪声
         if loss_type == 'l1':
@@ -78,7 +86,7 @@ class DiffusionModel():
         return loss
 
     @torch.no_grad()
-    def p_sample(self,model, x, t, t_index):
+    def p_sample(self,model, x, t, t_index, p):
         betas_t = self.extract(self.betas, t, x.shape)
         sqrt_one_minus_alphas_cumprod_t = self.extract(
             self.sqrt_one_minus_alphas_cumprod, t, x.shape
@@ -88,7 +96,7 @@ class DiffusionModel():
         # Equation 11 in the paper
         # Use our model (noise predictor) to predict the mean
         model_mean = sqrt_recip_alphas_t * (
-            x - betas_t * model(x, t) / sqrt_one_minus_alphas_cumprod_t
+            x - betas_t * model(x, t, p) / sqrt_one_minus_alphas_cumprod_t
         )
     
         if t_index == 0:
@@ -120,23 +128,19 @@ class DiffusionModel():
     
     def train(self,dataloader,epochs=1):
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = Unet(
-            dim=28,
-            channels=1,
-            dim_mults=(1, 2, 4,)
-        )
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-3)
         for epoch in range(epochs):
             for step, batch in enumerate(dataloader):
                 optimizer.zero_grad()
         
-                batch_size = batch["pixel_values"].shape[0]
-                batch = batch["pixel_values"].to(device)
+                batch_size = batch["image_ori"].shape[0]
+                batch = batch.to(device)
         
                 # Algorithm 1 line 3: sample t uniformally for every example in the batch
                 t = torch.randint(0, self.timesteps, (batch_size,), device=device).long()
             
-                loss = self.p_losses(model, batch, t, loss_type="huber")
+                loss = self.p_losses(self.model, batch, t, loss_type="huber")
             
                 if step % 100 == 0:
                     print("Loss:", loss.item())
@@ -144,11 +148,9 @@ class DiffusionModel():
                 loss.backward()
                 optimizer.step()
 
-        return model
+        return self.model
     
     def inference(self,model,image_size=28,channels=1):
         # sample 64 images
         samples = self.sample(model, image_size=image_size, batch_size=64, channels=channels)
-        
-        # show a random one
-        random_index = 5
+        pass

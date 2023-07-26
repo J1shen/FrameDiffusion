@@ -1,3 +1,4 @@
+# This script is used for testing
 from PIL import Image
 import requests
 import torch,random

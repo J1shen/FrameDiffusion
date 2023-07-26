@@ -1,5 +1,7 @@
 from torchvision.transforms import Compose, ToTensor, Lambda, ToPILImage, CenterCrop, Resize
 import numpy as np
+from PIL import Image
+import torch
 
 def img2vec(image,image_size = 128):
     transform = Compose([
@@ -21,3 +23,17 @@ def vec2img(vec):
         ToPILImage(),
     ])
     return reverse_transform(vec)
+
+def pil2tensor(item):
+    tensor_img = torch.from_numpy(np.array(item)).permute(2, 0, 1).float()/255.0
+    return tensor_img
+
+def tensor2pil(item):
+    tensor = item
+    tensor = tensor.cpu().clone()
+    tensor = tensor.squeeze(0)
+    tensor = tensor.permute(1, 2, 0)
+    image = tensor.numpy()
+    image = (image * 255).astype(np.uint8)
+    image = Image.fromarray(image)
+    return image
